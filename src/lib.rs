@@ -68,52 +68,32 @@ impl ClientInner {
         while let Some(cmd) = self.cmd_rx.recv().await {
             match cmd {
                 SendType::Transaction { tx, response } => {
-                    let _ = self.new_tx_sender.send(tx);
+                    self.new_tx_sender.send(tx).unwrap();
 
-                    let res = self
-                        .new_tx_responses
-                        .next()
-                        .await
-                        .expect("TxResponse should not be empty")
-                        .unwrap();
-
-                    let _ = response.send(res);
+                    if let Some(res) = self.new_tx_responses.next().await {
+                        let _ = response.send(res.unwrap());
+                    }
                 }
                 SendType::RawTransaction { msg, response } => {
-                    let _ = self.new_raw_tx_sender.send(msg);
+                    self.new_raw_tx_sender.send(msg).unwrap();
 
-                    let res = self
-                        .new_raw_tx_responses
-                        .next()
-                        .await
-                        .expect("TxResponse should not be empty")
-                        .unwrap();
-
-                    let _ = response.send(res);
+                    if let Some(res) = self.new_raw_tx_responses.next().await {
+                        let _ = response.send(res.unwrap());
+                    }
                 }
                 SendType::TransactionSequence { msg, response } => {
-                    let _ = self.new_tx_seq_sender.send(msg);
+                    self.new_tx_seq_sender.send(msg).unwrap();
 
-                    let res = self
-                        .new_tx_seq_responses
-                        .next()
-                        .await
-                        .expect("TxSequenceReponse should not be empty")
-                        .unwrap();
-
-                    let _ = response.send(res);
+                    if let Some(res) = self.new_tx_seq_responses.next().await {
+                        let _ = response.send(res.unwrap());
+                    }
                 }
                 SendType::RawTransactionSequence { msg, response } => {
-                    let _ = self.new_raw_tx_seq_sender.send(msg);
+                    self.new_raw_tx_seq_sender.send(msg).unwrap();
 
-                    let res = self
-                        .new_raw_tx_seq_responses
-                        .next()
-                        .await
-                        .expect("TxSequenceReponse should not be empty")
-                        .unwrap();
-
-                    let _ = response.send(res);
+                    if let Some(res) = self.new_raw_tx_seq_responses.next().await {
+                        let _ = response.send(res.unwrap());
+                    }
                 }
             }
         }
@@ -369,17 +349,17 @@ fn tx_to_proto(tx: EthersTx) -> Transaction {
     let to = tx.to.map(|to| to.as_bytes().to_vec());
 
     let tx_type = match tx.transaction_type {
-        Some(tp) => tp.as_u32(),
+        Some(tp) => tp.as_u64(),
         None => 0,
     };
 
-    let mut val_bytes = [0];
+    let mut val_bytes = [0; 32];
     tx.value.to_big_endian(&mut val_bytes);
 
-    let mut r_bytes = [0];
+    let mut r_bytes = [0; 32];
     tx.r.to_big_endian(&mut r_bytes);
 
-    let mut s_bytes = [0];
+    let mut s_bytes = [0; 32];
     tx.s.to_big_endian(&mut s_bytes);
 
     let acl = match tx.access_list {
@@ -412,7 +392,7 @@ fn tx_to_proto(tx: EthersTx) -> Transaction {
         nonce: tx.nonce.as_u64(),
         value: val_bytes.to_vec(),
         from: Some(tx.from.as_bytes().to_vec()),
-        r#type: tx_type,
+        r#type: tx_type as u32,
         max_fee: tx
             .max_fee_per_gas
             .unwrap_or(ethers::types::U256::zero())
@@ -480,6 +460,21 @@ fn proto_to_tx(proto: Transaction) -> EthersTx {
         acl = Some(ethers::types::transaction::eip2930::AccessList(new_acl));
     }
 
+    let v = if tx_type.is_some() {
+        if proto.v > 1 {
+            proto.v - 37
+        } else {
+            proto.v
+        }
+    } else {
+        // Legacy
+        if proto.v > 30 {
+            proto.v - 10
+        } else {
+            proto.v
+        }
+    };
+
     EthersTx {
         hash: ethers::types::H256::from_slice(proto.hash.as_slice()),
         nonce: proto.nonce.into(),
@@ -492,7 +487,7 @@ fn proto_to_tx(proto: Transaction) -> EthersTx {
         gas_price,
         gas: proto.gas.into(),
         input: proto.input.into(),
-        v: proto.v.into(),
+        v: v.into(),
         r,
         s,
         transaction_type: tx_type,
@@ -501,5 +496,24 @@ fn proto_to_tx(proto: Transaction) -> EthersTx {
         max_fee_per_gas: max_fee,
         chain_id: Some(proto.chain_id.into()),
         other: OtherFields::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ethers::utils::rlp::{Decodable, Rlp};
+
+    use super::*;
+
+    #[test]
+    fn should_convert_tx_to_proto() {
+        let signed_rlp = hex::decode("02f864010314018261a894b94f5374fce5edbc8e2a8697c15331677e6ebf0b0a825544c001a0e4663a0f2ea882cf5b38ee63b375dd116d75153d7bbcff972aee6fe0ecc920fca050917b98425bd43a3bfdc4ecd2de4424d6b2b6b5fd55d0b34fc805db58d0224b").unwrap();
+
+        let tx_rlp = Rlp::new(signed_rlp.as_slice());
+        let tx = EthersTx::decode(&tx_rlp).unwrap();
+
+        let proto = tx_to_proto(tx);
+
+        println!("proto: {:?}", proto);
     }
 }
